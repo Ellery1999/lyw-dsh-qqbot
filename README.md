@@ -22,21 +22,49 @@
 
 ## 安装
 
+### 1. 下载归档
+
+从 [Releases](https://github.com/Ellery1999/lyw-dsh-qqbot/releases) 下载
+`lyw-dsh-qqbot-<version>.tgz`（也可以按下面「从源码构建」自己打包）。
+
+### 2. 装进 profile
+
 ```powershell
-# 1. 打包
-pnpm pack                                  # 产出 lyw-dsh-qqbot-<version>.tgz
-
-# 2. 装进使用中的 profile（例如 web）
-Copy-Item .\lyw-dsh-qqbot-*.tgz "$env:USERPROFILE\.dsh\profiles\web\vendor\"
-dsh plugin --profile web add "$env:USERPROFILE\.dsh\profiles\web\vendor\lyw-dsh-qqbot-<version>.tgz"
-
-# 3. 在 $DSH_HOME/profiles/web/cordis.patch.yml 末尾插入一行
-#    - insert:
-#        - id: qqbot
-#          name: '@lyw/dsh-qqbot'
-
-# 4. 重启该 profile（web profile 的 patchReload 是 live，保存补丁文件即会热挂载）
+$tgz = "$env:USERPROFILE\.dsh\profiles\web\vendor\lyw-dsh-qqbot-<version>.tgz"
+Copy-Item .\lyw-dsh-qqbot-<version>.tgz (Split-Path $tgz)
+dsh plugin --profile web add $tgz
 ```
+
+### 3. 注册插件行
+
+在 `$DSH_HOME/profiles/web/cordis.patch.yml` 末尾插入：
+
+```yaml
+- insert:
+    - id: qqbot
+      name: '@lyw/dsh-qqbot'
+```
+
+### 4. 重启 DSH 并硬刷新浏览器
+
+改完补丁文件后**必须整进程重启** DSH，然后在浏览器里按 **Ctrl+F5**。
+
+> 为什么热挂载不够：web profile 的 `patchReload: live` 只做**配置**热重载。DSH 为 live
+> profile 挂的 HMR 实例是 `{ root: [] }`（见 `apps/cli/src/profile-boot.ts`），没有模块根，
+> 源码注释写明 *"without replacing source modules"* —— 插件模块不会重新导入；而入口模块
+> 按包名经 Node ESM 缓存解析，同路径重挂仍是内存里的旧代码。客户端半（`lib/client.js`）
+> 的模块图也只在 web app 启动时扫描一次。所以升级/降级后请重启 DSH，否则你会以为装上了，
+> 实际跑的还是旧版本。
+
+### 从源码构建
+
+```powershell
+git clone https://github.com/Ellery1999/lyw-dsh-qqbot.git
+cd lyw-dsh-qqbot
+pnpm pack
+```
+
+产出的 `lyw-dsh-qqbot-<version>.tgz` 按上面第 2 步起操作。
 
 ## 配置
 
