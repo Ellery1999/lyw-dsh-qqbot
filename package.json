@@ -1,0 +1,48 @@
+{
+  "name": "@lyw/dsh-qqbot",
+  "description": "把 DSH 接到 QQ 官方机器人（QQ Bot API v2）：QQ 私聊/群聊 → ACP → DSH 会话。配置在 设置→插件→配置→qqbot，扫码绑定页 /plugins/qqbot。",
+  "version": "0.3.2",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./gateway": "./lib/gateway.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node tests/unit.mjs && node tests/client.mjs && node tests/e2e.mjs",
+    "test:unit": "node tests/unit.mjs",
+    "test:client": "node tests/client.mjs",
+    "test:offline": "node tests/e2e.mjs --skip-llm"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ellery1999/lyw-dsh-qqbot.git"
+  },
+  "homepage": "https://github.com/Ellery1999/lyw-dsh-qqbot#readme",
+  "bugs": {
+    "url": "https://github.com/Ellery1999/lyw-dsh-qqbot/issues"
+  },
+  "comment": "Peer 通过 $DSH_HOME/profiles/node_modules 回退层解析，所以统一写 '*'。",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "ws": "^8.21.3"
+  }
+}

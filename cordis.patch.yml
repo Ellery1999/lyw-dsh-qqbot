@@ -1,0 +1,8 @@
+# 本插件向 profile 贡献的组合补丁。
+#
+# 手工安装（pnpm pack + `dsh plugin --profile <name> add <tgz>`）时，需要把下面这条
+# insert 行加进 `$DSH_HOME/profiles/<name>/cordis.patch.yml`；`dsh-user-plugin-manager`
+# 导入归档时会自动把本文件内容套进托管块里。
+- insert:
+    - id: qqbot
+      name: '@lyw/dsh-qqbot'
