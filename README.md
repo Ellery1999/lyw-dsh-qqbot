@@ -52,10 +52,21 @@
 
 1. 侧栏打开 **「插件」** → 点 **「添加插件」**
 2. 在输入框里填入下列**任意一种** spec，然后点「安装」：
+   - **GitHub 仓库地址**（推荐，拿到最新代码）：下列三种写法等价
+     - `github:Ellery1999/lyw-dsh-qqbot`
+     - `https://github.com/Ellery1999/lyw-dsh-qqbot`
+     - `git+https://github.com/Ellery1999/lyw-dsh-qqbot.git`
+     （同样支持 `gitlab:` / `bitbucket:` / `gist:` 简写，以及任意 git 托管地址；端口、分支/标签可用 `#` 指定）
    - 发布包名：`@lyw/dsh-qqbot`（已发布到 registry 时）
    - 本地 tarball：`<你的路径>\lyw-dsh-qqbot-<version>.tgz`
    - 本地源码目录：`<你的路径>\lyw-dsh-qqbot`
 3. 安装完成后点 **「立即启用」**；随后**整进程重启 DSH**（见下面的「为什么必须重启」）
+
+> **关于 GitHub 地址**：安装时宿主会先做一次 `git ls-remote` 连通性检查，再由 pnpm 克隆并安装；
+> 因此**装到的是仓库当前默认分支的代码**，不需要你本地先 clone。两点注意：
+> ① 宿主在下载前无法读取 `package.json`，所以「检查 spec」这一步只答复 `kind: git` 与主机名，
+> **是否算组合包要等克隆完读取 `dsh.bundle.patch` 才判定**；
+> ② 该仓库必须已经包含适配后的代码（0.3.2 及更早的提交没有 `dsh.bundle.patch`，会被判 `not-a-bundle`）。
 
 安装走的是官方组合包流程：本包 `package.json` 用
 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 声明组合补丁，`cordis.patch.yml` 里的
@@ -64,6 +75,10 @@
 ### 方式二：命令行（0.1.5 / 无 GUI 环境）
 
 ```powershell
+# 从 GitHub 安装（推荐）
+dsh plugin --profile web add github:Ellery1999/lyw-dsh-qqbot
+
+# 或用本地 tarball
 dsh plugin --profile web add .\lyw-dsh-qqbot-<version>.tgz
 ```
 
