@@ -13,7 +13,7 @@
 | | |
 |---|---|
 | 适配 DSH | **0.1.7-rc.2（Web 端 / 桌面端）**；0.1.5-rc.2 仍可加载运行 |
-| 包版本 | 0.4.4 |
+| 包版本 | 0.4.5 |
 | 许可证 | MIT |
 
 ## 特性
@@ -244,10 +244,13 @@ ctx.slots.inject('plugins.bundle.config', () =>
 
 **2. provider / 模型配置自动复用。** QQ 里 `/model` 能看到的 provider 完全取决于 ACP 用的 profile
 （`dsh --profile acp`）自己的组合；用户在主 profile 里配的 provider，ACP 默认看不到。
-`syncAcpProviderConfig()` 因此把手**当前 profile**（读 `DSH_PROFILE_DIR`，因此 **desktop 与 web 都适用**）
-里模型相关的条目自动复制到 acp profile：
+`syncAcpProviderConfig()` 因此把手**当前 profile**（读宿主 boot 时提供的 `profileContext` 服务，
+即 `ctx.get('profileContext')`，因此 **desktop 与 web 都适用**）里模型相关的条目自动复制到 acp profile：
 
 - 复制条目：`llm-pi-ai`（providers）/ `agent-default-model` / `permission`
+- 追加条目：`acp` —— 由 `agent-default-model` 推出 `{ provider, model }`。**光有 `agent-default-model`
+  不够**：最后一个 bundle `@deepseek-ai/dsh-acp-app` 把 `id: acp` 的默认模型写死成官方 provider，
+  而 ACP 会话的默认模型取自这一条；不覆盖它，QQ 侧每个新会话都会默认落到官方 provider 上。
 - 复制时机：插件挂载时 + 每次真正拉起网关前 ⇒ 在主界面换模型后，QQ 侧下次启动自动跟上
 - **不解析 YAML**：按顶层 `- id:` 分块搬运，避免引入运行时依赖
 - **密钥不用搬**：`apiKeyEnv` 是凭据引用（`z.string().role('credential-ref')`），运行期由
@@ -259,6 +262,10 @@ ctx.slots.inject('plugins.bundle.config', () =>
 |---|---|
 | 只同步 acp profile，不用 `$DSH_HOME/cordis.patch.yml` | home 级 patch 会叠加在**所有** profile 之后（含 desktop），会遮蔽用户在设置里的后续修改 |
 | acp profile 未初始化时不写 | 只 mkdir 一个含 `cordis.patch.yml` 的目录会做出启动不了的半成品 profile；等启动器初始化后再同步 |
+
+> ℹ️ **首次安装要重启两次的原因**：第一次启动网关时 acp profile 还不存在，同步按设计跳过（上表第二行）；
+> acp profile 由第一次拉起 ACP 时创建，此后下一次同步才会写入。所以装好插件 → 整进程重启 → 网关拉起过一次
+> ACP → 再重启一次网关，`/model` 才能看到自己的 provider。
 
 > ⚠️ `$DSH_HOME/profiles/acp/cordis.patch.yml` 是**自动生成物**（头部有 `# 由 @lyw/dsh-qqbot 自动同步`），
 > 手改会在下次同步被覆盖 —— 要改模型请改主 profile 的设置。
@@ -293,7 +300,8 @@ ctx.slots.inject('plugins.bundle.config', () =>
 | 插件页里看不到卡片 | 浏览器半未加载 / key 不匹配 | 确认包名与注册 key 都是 `@lyw/dsh-qqbot`，重启后 Ctrl+F5 硬刷新 |
 | 点了「打开配置扫码页」没反应 | 桌面端 Electron 外壳丢弃本地 `http://127.0.0.1` 外链 | 已改为卡片内配置/扫码；需要链接时用「复制配置页地址」 |
 | 扫码成功但一直连不上 | 多半是 ACP 子进程起不来 | 看卡片「查看网关日志尾部」；若见 `'D:\DSH' 不是内部或外部命令`，说明 `acpCommand` 路径含空格且没过 `shell:false`（0.4.3+ 已修） |
-| QQ 里只看到官方 provider，看不到自己配的 | ACP 用的 `acp` profile 里没有该 provider | 0.4.4+ 会自动同步；仍不行则确认主 profile 的 `llm-pi-ai` 配对了，并重启网关 |
+| QQ 里只看到官方 provider，看不到自己配的 | ACP 用的 `acp` profile 里没有该 provider | 0.4.5+ 会自动同步；仍不行则确认主 profile 的 `llm-pi-ai` 配对了，并重启网关（首次安装需重启两次，见上文说明） |
+| `/model` 能看到自己的 provider，但新会话默认还是官方模型 | 只同步 `agent-default-model` 管不到 ACP 会话默认值 | 0.4.5+ 会自动追加 `- id: acp` 覆盖块；确认 `$DSH_HOME/profiles/acp/cordis.patch.yml` 里有该条目，然后 `/new` 开新会话 |
 | `/model` 切换无效 | 模型选项来自 ACP `configOptions`，未就绪时为空 | 先 `/status` 看模型字段；必要时重启网关 |
 | 机器人不回消息 / 回「发送过快」 | 触发被动回复额度或出现双连接 | 遵守单聊 60 分钟 4 条、群聊 5 分钟 5 条；确认只有一个网关（`gateway.lock` 会拦住第二个） |
 | 发文件报「超过今天发送文件容量上限」 | 平台按 bot 计的每日容量上限（`40093002`） | 次日恢复，网关已翻译成人话，不会重试 |
