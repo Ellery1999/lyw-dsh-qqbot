@@ -3,7 +3,7 @@
  * 用法：node tests/unit.mjs
  */
 import { createCipheriv, randomBytes } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -17,9 +17,11 @@ import {
   quotedTextOf,
   readLastUserOpenId,
   toPlainText,
+  VERSION,
 } from '../lib/gateway.mjs'
 import { PROTOCOL, fileTypeFor, normalizePrepare } from '../lib/qq-transport.mjs'
 import { decryptClientSecret, renderQrSvg } from '../lib/bind.mjs'
+import { acpDefaultBlock, syncAcpProviderConfig } from '../lib/index.js'
 
 const results = []
 function check(name, condition, detail = '') {
@@ -303,6 +305,168 @@ check('坏数据不抛错', (() => {
   const text = formatSessionList([{ sessionId: 'abc' }, {}], new Map(), null)
   return typeof text === 'string' && text.includes('abc')
 })())
+
+console.log('\n[VERSION]')
+check('网关版本取自 package.json', VERSION === JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version)
+check('不再写死已经漂移的旧版本号', VERSION !== '0.3.2' && /^\d+\.\d+\.\d+/.test(VERSION))
+
+console.log('\n[acp 配置同步]')
+/** 一份典型的源 profile 补丁：3 个要搬运的条目 + 1 个不该搬的。 */
+const SOURCE_PATCH = [
+  '- id: llm-pi-ai',
+  '  name: "@deepseek-ai/dsh-llm-pi-ai"',
+  '  config:',
+  '    providers:',
+  '      yyapi-1:',
+  '        apiKeyEnv: YYAPI_1_API_KEY',
+  '- id: agent-default-model',
+  '  name: "@deepseek-ai/dsh-agent-default-model"',
+  '  config:',
+  '    provider: yyapi-1',
+  '    model: deepseek-flash',
+  '    reasoningEffort: high',
+  '- id: permission',
+  '  name: "@deepseek-ai/dsh-permission-presets"',
+  '  config:',
+  '    defaultPreset: danger-full-access',
+  '- id: qqbot',
+  '  name: "@lyw/dsh-qqbot"',
+  '  config:',
+  '    appId: "1"',
+  '',
+].join('\n')
+
+/** 静默 logger：同步逻辑的日志不是断言对象。 */
+const SILENT = { info() {}, warn() {} }
+
+/** 造一个「有内容的 desktop profile + 已初始化的空 acp profile」的临时 $DSH_HOME。 */
+function makeSyncFixture({ initAcp = true } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'qqbot-sync-'))
+  const sourceDir = join(home, 'profiles', 'desktop')
+  mkdirSync(sourceDir, { recursive: true })
+  writeFileSync(join(sourceDir, 'cordis.patch.yml'), SOURCE_PATCH)
+  if (initAcp) {
+    const acpDir = join(home, 'profiles', 'acp')
+    mkdirSync(acpDir, { recursive: true })
+    writeFileSync(join(acpDir, 'package.json'), '{"name":"dsh-profile-acp"}\n')
+  }
+  return { home, sourceDir, acpPatch: join(home, 'profiles', 'acp', 'cordis.patch.yml') }
+}
+
+/** 取出 patch 文件里的顶层 `- id:` 列表。 */
+function topLevelIds(text) {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => /^- id:/.test(line))
+    .map((line) => line.replace(/^- id:\s*/, '').trim())
+}
+
+/** 在临时 home 上跑两次同步（第二次用来验证幂等），跑完清干净。 */
+function runSync({ initAcp = true, passContext = true } = {}) {
+  const fixture = makeSyncFixture({ initAcp })
+  const ctx = passContext ? { name: 'desktop', dir: fixture.sourceDir } : undefined
+  try {
+    const first = syncAcpProviderConfig(fixture.home, SILENT, ctx)
+    const second = syncAcpProviderConfig(fixture.home, SILENT, ctx)
+    return {
+      first,
+      second,
+      text: existsSync(fixture.acpPatch) ? readFileSync(fixture.acpPatch, 'utf8') : null,
+    }
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true, maxRetries: 3 })
+  }
+}
+
+/** 在临时 fixture 上跑一次自定义断言，跑完清干净。 */
+function withFixture(fn, options) {
+  const fixture = makeSyncFixture(options)
+  try {
+    return fn(fixture)
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true, maxRetries: 3 })
+  }
+}
+
+/** 临时清掉两个环境变量后执行，结束后恢复。 */
+function withoutProfileEnv(fn) {
+  const savedDir = process.env.DSH_PROFILE_DIR
+  const savedProfile = process.env.DSH_PROFILE
+  delete process.env.DSH_PROFILE_DIR
+  delete process.env.DSH_PROFILE
+  try {
+    return fn()
+  } finally {
+    if (savedDir === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = savedDir
+    if (savedProfile === undefined) delete process.env.DSH_PROFILE
+    else process.env.DSH_PROFILE = savedProfile
+  }
+}
+
+check('acpDefaultBlock 由 agent-default-model 推出 provider/model', (() => {
+  const block = acpDefaultBlock([
+    '- id: agent-default-model\n  config:\n    provider: yyapi-1\n    model: deepseek-flash\n    reasoningEffort: high',
+  ])
+  return block.startsWith('- id: acp') && block.includes('provider: yyapi-1') && block.includes('model: deepseek-flash')
+})())
+check('acpDefaultBlock 声明 acp 插件名', (() => {
+  const block = acpDefaultBlock(['- id: agent-default-model\n  config:\n    provider: a\n    model: b'])
+  return block.includes('name: "@deepseek-ai/dsh-acp"')
+})())
+check('acpDefaultBlock 不带 reasoningEffort（dsh-acp 没这个字段）', (() => {
+  const block = acpDefaultBlock([
+    '- id: agent-default-model\n  config:\n    provider: a\n    model: b\n    reasoningEffort: high',
+  ])
+  return !block.includes('reasoningEffort')
+})())
+check('没有 agent-default-model 时 acpDefaultBlock 返回 undefined', acpDefaultBlock([
+  '- id: permission\n  config:\n    defaultPreset: x',
+]) === undefined)
+check('条目里没有 provider/model 时返回 undefined', acpDefaultBlock(['- id: agent-default-model\n  config: {}']) === undefined)
+check('空条目列表返回 undefined', acpDefaultBlock([]) === undefined)
+
+check('profileContext 在时真的写入 acp profile（回归：以前读 process.env 永不写）', (() => {
+  const r = runSync()
+  return r.first === true && r.text !== null
+})())
+check('写出 3 个复制条目 + 1 个 acp 覆盖块，顺序稳定', (() => {
+  const r = runSync()
+  return JSON.stringify(topLevelIds(r.text)) ===
+    JSON.stringify(['llm-pi-ai', 'agent-default-model', 'permission', 'acp'])
+})())
+check('不搬运无关条目（qqbot 自己不会被复制进 acp）', !runSync().text.includes('- id: qqbot'))
+check('写出后第二次同步返回 false（幂等，不反复写盘）', runSync().second === false)
+check('文件头保留「自动同步」标记（说明是生成物）', runSync().text.includes('# 由 @lyw/dsh-qqbot 自动同步'))
+check('无 profileContext 且环境变量未注入时不写（即修复前的行为）', withoutProfileEnv(() => {
+  const r = runSync({ passContext: false })
+  return r.first === false && r.second === false && r.text === null
+}))
+check('process.env 回退仍然可用（外部注入了这两个变量的部署）', withoutProfileEnv(() => withFixture((f) => {
+  process.env.DSH_PROFILE_DIR = f.sourceDir
+  process.env.DSH_PROFILE = 'desktop'
+  return syncAcpProviderConfig(f.home, SILENT, undefined) === true
+})))
+check('源 profile 就是 acp 时不动（没有上游可抄）', withFixture(
+  (f) => syncAcpProviderConfig(f.home, SILENT, { name: 'acp', dir: f.sourceDir }) === false,
+))
+check('acp profile 未初始化时不写（不造启动不了的半成品 profile）', (() => {
+  const r = runSync({ initAcp: false })
+  return r.first === false && r.text === null
+})())
+check('源 profile 没有 cordis.patch.yml 时不写', withFixture((f) => {
+  rmSync(join(f.sourceDir, 'cordis.patch.yml'), { force: true })
+  return syncAcpProviderConfig(f.home, SILENT, { name: 'desktop', dir: f.sourceDir }) === false
+}))
+check('源 profile 只有无关条目时不写', withFixture((f) => {
+  writeFileSync(join(f.sourceDir, 'cordis.patch.yml'), '- id: qqbot\n  config:\n    appId: "1"\n')
+  return syncAcpProviderConfig(f.home, SILENT, { name: 'desktop', dir: f.sourceDir }) === false
+}))
+check('写盘失败时不抛错，只返回 false', withFixture((f) => {
+  // 把 acp 的 patch 位置占成目录，writeFileSync 必然失败
+  mkdirSync(join(f.home, 'profiles', 'acp', 'cordis.patch.yml'), { recursive: true })
+  return syncAcpProviderConfig(f.home, SILENT, { name: 'desktop', dir: f.sourceDir }) === false
+}))
 
 const passed = results.filter(Boolean).length
 console.log(`\n===== ${passed}/${results.length} 通过 =====`)
