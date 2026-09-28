@@ -12,8 +12,8 @@
 
 | | |
 |---|---|
-| 适配 DSH | **0.1.7-rc.2（Web 端 / 桌面端）**；0.1.5-rc.2 仍可加载运行 |
-| 包版本 | 0.4.5 |
+| 适配 DSH | **0.2.0-rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
+| 包版本 | 0.4.6 |
 | 许可证 | MIT |
 
 ## 特性
@@ -28,7 +28,7 @@
 
 ## 前置要求
 
-1. 一个可用的 **DSH**：0.1.7-rc.2（Web 端或桌面端）或 0.1.5-rc.2。
+1. 一个可用的 **DSH**：0.2.0-rc.1（Web 端或桌面端），0.1.7-rc.2 或 0.1.5-rc.2 亦可加载运行。
 2. 一个 **QQ 开放平台机器人**，能拿到 **AppID / AppSecret**
    （没有的话可以用插件的扫码绑定流程创建并授权）。
 3. 桌面端或 Web 端至少要有一个能正常打开的 DSH 界面。
@@ -311,8 +311,18 @@ ctx.slots.inject('plugins.bundle.config', () =>
 
 | DSH | 状态 |
 |---|---|
-| **0.1.7-rc.2（Web / 桌面端）** | ✅ 已适配：组合包安装、「插件」页卡片、Electron ACP 启动、provider 自动复用 |
+| **0.2.0-rc.1（Web / 桌面端）** | ✅ 已适配：无需改动插件代码，直接通过 0.2.0-rc.1 新增的插件兼容性闸门 |
+| 0.1.7-rc.2（Web / 桌面端） | ✅ 已适配：组合包安装、「插件」页卡片、Electron ACP 启动、provider 自动复用 |
 | 0.1.5-rc.2 | 仍可加载运行：`.volatile()` / `installSection` 等差异用能力探测兜住；但设置写入路径不可用（旧 `installSection` 已删），配置改由 profile 补丁固定 |
+
+> **关于 0.2.0-rc.1 的兼容性闸门**：`dsh-app-boot` 会校验插件 `peerDependencies` 中所有
+> `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 项，只要有一项不满足
+> `semver.satisfies(runtime, range, { includePrerelease: true })`，就**跳过整个 bundle**。
+> 本插件的 peer 只有 `@deepseek-ai/schemastery: "*"`（不匹配 `dsh*` 前缀，不参与校验），
+> 因此 **0.2.0-rc.1 下无需改动任何声明即可正常加载**；`engines.dsh` 只是元数据，不参与该闸门。
+> 实测（真实 `@deepseek-ai/dsh@0.2.0-rc.1` 运行时树）：`--dump-config` 零兼容性警告，
+> `qqbot` 行正常挂载，`ctx.settings`（`SettingsForms`）、`schemastery.volatile()`、
+> `ctx.subprocess`、`ctx.webServer` 等被依赖的接口均未变。
 
 ## 安全提醒
 
