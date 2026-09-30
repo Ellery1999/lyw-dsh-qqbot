@@ -1,7 +1,7 @@
 {
   "name": "@lyw/dsh-qqbot",
   "description": "把 DSH 接到 QQ 官方机器人（QQ Bot API v2）：QQ 私聊/群聊 → ACP → DSH 会话。在「插件」页查看状态并配置，扫码绑定页 /plugins/qqbot。",
-  "version": "0.4.6",
+  "version": "0.5.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -17,9 +17,11 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "test": "node tests/unit.mjs && node tests/client.mjs && node tests/e2e.mjs",
+    "test": "node tests/unit.mjs && node tests/client.mjs && node tests/compat.mjs && node tests/e2e.mjs",
     "test:unit": "node tests/unit.mjs",
     "test:client": "node tests/client.mjs",
+    "test:compat": "node tests/compat.mjs",
+    "test:tool": "node tests/tool-register.mjs",
     "test:offline": "node tests/e2e.mjs --skip-llm"
   },
   "dsh": {
@@ -33,7 +35,7 @@
     }
   },
   "engines": {
-    "dsh": "0.2.0-rc.1"
+    "dsh": "^0.2.0-rc.1"
   },
   "license": "MIT",
   "repository": {

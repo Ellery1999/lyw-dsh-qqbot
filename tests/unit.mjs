@@ -22,6 +22,23 @@ import {
 import { PROTOCOL, fileTypeFor, normalizePrepare } from '../lib/qq-transport.mjs'
 import { decryptClientSecret, renderQrSvg } from '../lib/bind.mjs'
 import { acpDefaultBlock, syncAcpProviderConfig } from '../lib/index.js'
+import {
+  MAX_PUSH_FILES,
+  buildPushPolicy,
+  checkPushTarget,
+  claimPushRequests,
+  clearPushResult,
+  idOfArtifact,
+  newRequestId,
+  outboxDir,
+  outboxSnapshot,
+  pruneOutbox,
+  readPushResult,
+  settlePushRequest,
+  validateRequestShape,
+  waitForPushResult,
+  writePushRequest,
+} from '../lib/outbox.mjs'
 
 const results = []
 function check(name, condition, detail = '') {
@@ -467,6 +484,210 @@ check('写盘失败时不抛错，只返回 false', withFixture((f) => {
   mkdirSync(join(f.home, 'profiles', 'acp', 'cordis.patch.yml'), { recursive: true })
   return syncAcpProviderConfig(f.home, SILENT, { name: 'desktop', dir: f.sourceDir }) === false
 }))
+
+console.log('\n[outbox：文件协议]')
+/** 造一个临时 stateDir 跑一段 outbox 场景，跑完清干净。 */
+function withOutbox(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'qqbot-outbox-'))
+  try {
+    return fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+  }
+}
+
+check('目录挂在 stateDir 下的 outbox 子目录', outboxDir('C:\\s').endsWith(join('s', 'outbox')))
+check('请求 id 是文件名安全的', /^[a-z0-9]+-[0-9a-f]+$/.test(newRequestId()))
+check('连续两轮的请求 id 不同', newRequestId() !== newRequestId())
+check('idOfArtifact 认请求文件', idOfArtifact('req-abc-123.json') === 'abc-123')
+check('idOfArtifact 认已认领文件', idOfArtifact('req-abc-123.json.claimed') === 'abc-123')
+check('idOfArtifact 拒绝结果文件（前缀不同）', idOfArtifact('res-abc-123.json') === null)
+check('idOfArtifact 拒绝无关文件', idOfArtifact('gateway.log') === null && idOfArtifact(null) === null)
+
+check('写请求后再认领能拿到同一条', withOutbox((dir) => {
+  const { id } = writePushRequest(dir, { kind: 'c2c', target: 'user-a', text: '你好' })
+  const claimed = claimPushRequests(dir)
+  return claimed.length === 1 && claimed[0].id === id && claimed[0].request.text === '你好'
+}))
+
+check('默认 kind 是 c2c、files 是空数组', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const request = claimPushRequests(dir)[0].request
+  return request.kind === 'c2c' && Array.isArray(request.files) && request.files.length === 0
+}))
+
+check('同一个请求只会被认领一次（rename 互斥）', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const first = claimPushRequests(dir)
+  const second = claimPushRequests(dir)
+  return first.length === 1 && second.length === 0
+}))
+
+check('多条请求一次全部认领', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: '1' })
+  writePushRequest(dir, { target: 'user-b', text: '2' })
+  writePushRequest(dir, { target: 'user-c', text: '3' })
+  return claimPushRequests(dir).length === 3
+}))
+
+check('内容损坏的请求被丢弃而不是反复重试', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  // 认领后把内容写坏，模拟落盘被截断
+  writeFileSync(claimed.path, '{ 坏掉的 JSON')
+  return claimPushRequests(dir).length === 0
+}))
+
+check('目录不存在时认领返回空数组而不是抛错', claimPushRequests(join(tmpdir(), 'qqbot-definitely-missing-dir')).length === 0)
+
+check('结果可回写并按 id 读回', withOutbox((dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: true, segments: 1, files: 0, durationMs: 42 })
+  const result = readPushResult(dir, id)
+  return result.ok === true && result.segments === 1 && result.durationMs === 42
+}))
+
+check('回写结果会删掉已认领的请求文件', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: true })
+  return !existsSync(claimed.path) && claimPushRequests(dir).length === 0
+}))
+
+check('失败结果保留 error 与业务码', withOutbox((dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: false, error: '主动消息额度已用完', code: '40034128' })
+  const result = readPushResult(dir, id)
+  return result.ok === false && result.error.includes('额度') && result.code === '40034128'
+}))
+
+check('未写出的结果读回 null', withOutbox((dir) => readPushResult(dir, 'nothing-here') === null))
+check('clearPushResult 删掉结果且可重复调用', withOutbox((dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: true })
+  clearPushResult(dir, id)
+  clearPushResult(dir, id)
+  return readPushResult(dir, id) === null
+}))
+
+check('快照分别统计待处理/已认领/结果', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: '1' })
+  writePushRequest(dir, { target: 'user-b', text: '2' })
+  const claimed = claimPushRequests(dir)
+  settlePushRequest(dir, claimed[0], { ok: true })
+  const snapshot = outboxSnapshot(dir)
+  return snapshot.claimed === 1 && snapshot.results === 1 && snapshot.pending === 0
+}))
+check('空目录快照全为 0', withOutbox((dir) => {
+  const s = outboxSnapshot(dir)
+  return s.pending === 0 && s.claimed === 0 && s.results === 0
+}))
+
+console.log('\n[outbox：清理]')
+check('ttl 内的文件不动', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  return pruneOutbox(dir) === 0 && outboxSnapshot(dir).pending === 1
+}))
+check('过期的待处理请求被清掉', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const removed = pruneOutbox(dir, { now: Date.now() + 25 * 60 * 60 * 1000 })
+  return removed === 1 && outboxSnapshot(dir).pending === 0
+}))
+check('过期的结果文件被清掉', withOutbox((dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: true })
+  pruneOutbox(dir, { now: Date.now() + 25 * 60 * 60 * 1000 })
+  return readPushResult(dir, id) === null
+}))
+check('已认领但过期的请求也会被清（不补发）', withOutbox((dir) => {
+  writePushRequest(dir, { target: 'user-a', text: 'x' })
+  claimPushRequests(dir)
+  const removed = pruneOutbox(dir, { now: Date.now() + 25 * 60 * 60 * 1000 })
+  return removed === 1 && outboxSnapshot(dir).claimed === 0
+}))
+check('清理不存在的目录返回 0', pruneOutbox(join(tmpdir(), 'qqbot-definitely-missing-dir-2')) === 0)
+
+console.log('\n[outbox：请求形状校验]')
+check('纯文本合法', validateRequestShape({ kind: 'c2c', target: 'user-a', text: '你好' }).length === 0)
+check('只带附件也合法', validateRequestShape({ kind: 'c2c', target: 'user-a', files: ['C:\\a.xlsx'] }).length === 0)
+check('没有正文也没有附件被拒', validateRequestShape({ kind: 'c2c', target: 'user-a' }).length === 1)
+check('空白正文且无附件被拒', validateRequestShape({ text: '   ', files: [] }).length === 1)
+check('非法的 kind 被拒', validateRequestShape({ kind: 'guild', text: 'x', target: 'a' })[0].includes('kind'))
+check('target 含路径分隔符被拒', validateRequestShape({ text: 'x', target: '../etc' }).length === 1)
+check('target 含查询串被拒', validateRequestShape({ text: 'x', target: 'a?b=c' }).length === 1)
+check('合法字符集的 target 通过', validateRequestShape({ text: 'x', target: 'AbC-123_x' }).length === 0)
+check('files 非数组被拒', validateRequestShape({ text: 'x', files: 'a.xlsx' }).length === 1)
+check('files 含空串被拒', validateRequestShape({ text: 'x', files: [''] }).length === 1)
+check(`附件超过 ${MAX_PUSH_FILES} 个被拒`, validateRequestShape({ text: 'x', files: ['a', 'b', 'c', 'd'] }).length === 1)
+check('subject 非字符串被拒', validateRequestShape({ text: 'x', subject: 1 }).length === 1)
+check('null 不抛错', validateRequestShape(null).length === 1)
+
+console.log('\n[outbox：目标白名单策略]')
+const POLICY_EMPTY = buildPushPolicy({})
+check('默认不放开任意目标', POLICY_EMPTY.allowAnyTarget === false)
+check('白名单为空时私聊目标被拒', checkPushTarget(POLICY_EMPTY, 'c2c', 'unknown-user').ok === false)
+check('白名单为空时给出可操作指引', checkPushTarget(POLICY_EMPTY, 'c2c', 'unknown-user').reason.includes('发一条消息'))
+check('群白名单为空时群推送被拒', checkPushTarget(POLICY_EMPTY, 'group', 'group-x').ok === false)
+check('群被拒时提示要加 allowGroups', checkPushTarget(POLICY_EMPTY, 'group', 'group-x').reason.includes('allowGroups'))
+
+const POLICY_FILLED = buildPushPolicy({
+  allowUsers: ['user-a', 'user-b'],
+  allowGroups: ['group-g'],
+  lastUserOpenId: 'user-recent',
+})
+check('白名单内的私聊放行', checkPushTarget(POLICY_FILLED, 'c2c', 'user-a').ok)
+check('最近私聊身份也放行', checkPushTarget(POLICY_FILLED, 'c2c', 'user-recent').ok)
+check('白名单外的私聊被拒', checkPushTarget(POLICY_FILLED, 'c2c', 'user-z').ok === false)
+check('被拒原因里点名该加哪个 openid', checkPushTarget(POLICY_FILLED, 'c2c', 'user-z').reason.includes('user-z'))
+check('白名单内的群放行', checkPushTarget(POLICY_FILLED, 'group', 'group-g').ok)
+check('白名单外的群被拒', checkPushTarget(POLICY_FILLED, 'group', 'group-z').ok === false)
+check('私聊白名单不适用于群（两个命名空间独立）', checkPushTarget(POLICY_FILLED, 'group', 'user-a').ok === false)
+check('群白名单不适用于私聊', checkPushTarget(POLICY_FILLED, 'c2c', 'group-g').ok === false)
+
+check('显式配置的默认推送目标被放行（否则「默认目标」会被自己拦下）', (() => {
+  const policy = buildPushPolicy({ defaultTarget: 'user-configured' })
+  return checkPushTarget(policy, 'c2c', 'user-configured').ok === true
+})())
+check('默认推送目标不会连带放行别的目标', (() => {
+  const policy = buildPushPolicy({ defaultTarget: 'user-configured' })
+  return checkPushTarget(policy, 'c2c', 'someone-else').ok === false
+})())
+check('默认推送目标不影响群推送（群仍默认关闭）', (() => {
+  const policy = buildPushPolicy({ defaultTarget: 'user-configured' })
+  return checkPushTarget(policy, 'group', 'user-configured').ok === false
+})())
+
+const POLICY_OPEN = buildPushPolicy({ allowAnyTarget: true })
+check('打开开关后任意合法私聊目标放行', checkPushTarget(POLICY_OPEN, 'c2c', 'whoever').ok)
+check('打开开关后任意合法群放行', checkPushTarget(POLICY_OPEN, 'group', 'whatever').ok)
+check('开关不绕过字符集校验（防 URL 注入）', checkPushTarget(POLICY_OPEN, 'c2c', '../etc').ok === false)
+check('开关不放行非法 kind', checkPushTarget(POLICY_OPEN, 'guild', 'x').ok === false)
+check('空 target 一律被拒', checkPushTarget(POLICY_OPEN, 'c2c', '').ok === false)
+
+console.log('\n[outbox：等待结果]')
+check('结果已存在时立即返回并清掉结果文件', await (async () => withOutbox(async (dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  settlePushRequest(dir, claimed, { ok: true, segments: 1 })
+  const result = await waitForPushResult(dir, id, { timeoutMs: 1000, intervalMs: 10 })
+  return result.ok === true && result.segments === 1 && readPushResult(dir, id) === null
+}))())
+check('稍后才写出的结果会被等到', await (async () => withOutbox(async (dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const [claimed] = claimPushRequests(dir)
+  setTimeout(() => settlePushRequest(dir, claimed, { ok: true, segments: 2 }), 120)
+  const result = await waitForPushResult(dir, id, { timeoutMs: 3000, intervalMs: 20 })
+  return result.ok === true && result.segments === 2
+}))())
+check('超时返回 ok:false 且说明原因（不抛错）', await (async () => withOutbox(async (dir) => {
+  const { id } = writePushRequest(dir, { target: 'user-a', text: 'x' })
+  const result = await waitForPushResult(dir, id, { timeoutMs: 150, intervalMs: 20 })
+  return result.ok === false && result.error.includes('超时')
+}))())
 
 const passed = results.filter(Boolean).length
 console.log(`\n===== ${passed}/${results.length} 通过 =====`)

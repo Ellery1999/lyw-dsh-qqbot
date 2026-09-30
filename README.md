@@ -2,18 +2,20 @@
 
 把 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 接到 **QQ 官方机器人（QQ Bot API v2）**：
 在 QQ 里私聊机器人、或在群里 @ 它，消息会交给一个**真实运行的 DSH 会话**（能读写文件、执行命令、调用工具），
-回复原路发回 QQ。
+回复原路发回 QQ。也能反过来——**让 DSH 主动推送消息到 QQ**（定时任务、告警、日报），不需要先等用户说话。
 
 ```
 手机 QQ ──► QQ 开放平台网关(WebSocket) ──► qqbot 网关进程 ──► ACP stdio ──► dsh --profile acp
                     ▲                                                        │
                     └──────────────── QQ 消息回复 ◄──────────────────────────┘
+
+定时任务 / agent 工具 ──► 投递箱(outbox) ──► 同一个网关进程 ──► 主动推送到 QQ
 ```
 
 | | |
 |---|---|
-| 适配 DSH | **0.2.0-rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
-| 包版本 | 0.4.6 |
+| 适配 DSH | **0.2.0-rc.2 / rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
+| 包版本 | 0.5.0 |
 | 许可证 | MIT |
 
 ## 特性
@@ -24,11 +26,12 @@
 - **可切换模型与思考强度**：`/model`、`/effort` 直接操作 ACP 会话的配置项；主界面里配的 provider 会自动同步给 QQ 这条链路。
 - **收发文件**：QQ 发来的图片/语音/文件会落到本地并写进提示词；DSH 也能把本地文件作为 QQ 附件发回。
 - **桌面端适配**：自动识别 Electron 运行时、自动拼出可用的 ACP 命令，无需手工填路径。
+- **主动推送**：`qqbot_send` 工具让你的定时任务/告警直接把消息推到 QQ，不必等用户先说话；插件页也能一键发测试消息。
 - **单实例保护**：同一 AppID 不会被两个网关同时连（避免被 QQ 判为发送过快）。
 
 ## 前置要求
 
-1. 一个可用的 **DSH**：0.2.0-rc.1（Web 端或桌面端），0.1.7-rc.2 或 0.1.5-rc.2 亦可加载运行。
+1. 一个可用的 **DSH**：0.2.0-rc.2 或 0.2.0-rc.1（Web 端或桌面端），0.1.7-rc.2 或 0.1.5-rc.2 亦可加载运行。
 2. 一个 **QQ 开放平台机器人**，能拿到 **AppID / AppSecret**
    （没有的话可以用插件的扫码绑定流程创建并授权）。
 3. 桌面端或 Web 端至少要有一个能正常打开的 DSH 界面。
@@ -164,11 +167,15 @@ pnpm pack
 | `workspace` | `$DSH_HOME/qqbot/workspace` | DSH 会话的工作目录 |
 | `acpCommand` | 自动探测 | 启动 ACP agent 的命令行；桌面端会自动填好 |
 | `autoApprove` | `true` | 自动允许 ACP 权限请求 |
-| `allowUsers` / `allowGroups` | `[]` | openid 白名单，留空不限制 |
+| `allowUsers` / `allowGroups` | `[]` | openid 白名单，留空不限制（入站准入，同时决定主动推送能推给谁） |
 | `extraPrompt` | — | 追加到每条消息后的要求 |
+| `pushMaxChars` | `3000` | 主动推送单条消息的字数上限，超出会分段（每段各占一条主动消息） |
+| `pushAllowAnyTarget` | `false` | 允许主动推送给不在白名单内的目标 |
+| `pushDefaultTarget` | — | 主动推送的默认目标 openid；留空用绑定/最近私聊的 QQ |
 
-状态与日志落在 `$DSH_HOME/qqbot/`：`status.json`（连接/会话/统计/最近私聊 openid）、
-`plugin.json`（插件挂载现场）、`gateway.log`、`sessions.json`（会话映射）、`attachments/`。
+状态与日志落在 `$DSH_HOME/qqbot/`：`status.json`（连接/会话/统计/最近私聊 openid/最近推送）、
+`plugin.json`（插件挂载现场）、`gateway.log`、`sessions.json`（会话映射）、`attachments/`、
+`outbox/`（主动推送的请求与结果，过期自动清理）。
 
 ### 白名单怎么填
 
@@ -284,13 +291,62 @@ ctx.slots.inject('plugins.bundle.config', () =>
    （一行一个，最多 3 个）。这一行不会出现在你看到的消息里，网关摘出来上传后作为 QQ 附件发出。
 2. **你点名要**：`/send <绝对路径>`，不经过模型。
 
-不给 agent 加工具的原因：ACP 侧拿不到「这个会话对应哪个 QQ 会话」，工具无法自证收件人；
-而回复文本天然带这个上下文。
+**回复里**不给 agent 加工具的原因：ACP 侧拿不到「这个会话对应哪个 QQ 会话」，工具无法自证收件人；
+而回复文本天然带这个上下文。**主动推送**是另一回事，它由调用方显式指定目标，所以做成了工具
+（见下一节）。
 
 上传走**分片**（`upload_prepare` → 逐片 PUT 预签名地址 → `upload_part_finish` → 带 `upload_id`
 调 `/files` 合并拿 `file_info` → `msg_type=7`）。不用 URL 直传，因为那条路要求文件已在公网可访问，
 而 DSH 手上的文件都在本机。`file_type` 按扩展名定：`.png/.jpg/.jpeg/.gif/.webp/.bmp` → 1（图片，
 直接展示）、`.mp4` → 2、`.silk` → 3，其余一律 4（文件卡片，可下载）。
+
+## 主动推送（不等用户说话）
+
+定时任务、告警、日报这类场景需要机器人**主动**发消息，而不是回复某条入站消息。对应两种入口：
+
+| 入口 | 用法 | 适合 |
+|---|---|---|
+| **agent 工具 `qqbot_send`** | 任意 DSH 会话（**含定时任务**）直接调用 | 定时任务把报告推到 QQ |
+| **插件页「发送测试消息」** | 「插件」页卡片 → 主动推送测试 → 填内容 → 发送 | 装完立刻验证链路 |
+
+工具参数：`text`（正文，必填）、`target`（openid，省略则用配置里的默认目标）、
+`kind`（`c2c` / `group`，默认 `c2c`）、`files`（本地附件绝对路径数组，最多 3 个）、`subject`（可选抬头）。
+
+在定时任务的 prompt 里这样写即可（**不需要** `msg_id`，也不依赖任何外部 CLI）：
+
+```
+调用 qqbot_send 工具，text 填报告全文，把黄金日报推送到 QQ。
+```
+
+### 它是怎么实现的
+
+网关是宿主 spawn 的**独立子进程**，独占 QQ 连接与 access_token；而工具跑在宿主进程里。
+两者通过 `$DSH_HOME/qqbot/outbox/` 这个**投递箱**通信：调用方写请求文件，网关每秒扫一次并回写结果。
+
+之所以不让宿主直连 QQ REST：重复调用 `getAppAccessToken` 可能顶掉网关正在用的 token，
+而且会绕开网关已有的分段、Markdown 清洗、附件上传与白名单校验。走投递箱则**只有一个 QQ 连接、一份 token**。
+
+> 网关没在运行时，工具会直接返回「网关未运行」，而不是写一个永远没人处理的请求文件。
+> 另外 QQ 要求机器人保持在线才能发消息，所以网关本来就必须在跑。
+
+### 主动消息 vs 被动回复
+
+| | 被动回复 | 主动推送 |
+|---|---|---|
+| 触发 | 必须先收到用户消息 | 随时 |
+| `msg_id` | **必带**（引用那条入站消息） | **不带**（这正是 QQ 判定主动消息的依据） |
+| 额度 | 单聊：60 分钟内 4 条；群聊：5 分钟内 5 条 | QQ 另有**独立的主动消息频次限制** |
+| 分段上限 | `maxChars`（默认 1200，受额度约束） | `pushMaxChars`（默认 3000，一条装完为优先） |
+
+主动推送失败时**不重试**，并把 QQ 的原始错误（含业务码）翻译成人话返回，
+例如「该用户关闭了接收主动消息」或「主动消息频次受限，稍后再试」。最近一次推送的结果会显示在插件页，
+计数进 `status.json` 的 `stats.pushes`。
+
+### 谁能收到推送
+
+默认**只允许白名单内的目标**（以及绑定过 / 最近私聊过的那个 QQ）：出站比入站更保守，
+否则一个 agent 就能往任意 QQ 发消息。要放开，勾选插件页的「允许任意目标」
+（配置项 `pushAllowAnyTarget`）。群推送默认关闭 —— 需要把 `group_openid` 加进 `allowGroups`。
 
 ## 故障排查
 
@@ -306,23 +362,33 @@ ctx.slots.inject('plugins.bundle.config', () =>
 | 机器人不回消息 / 回「发送过快」 | 触发被动回复额度或出现双连接 | 遵守单聊 60 分钟 4 条、群聊 5 分钟 5 条；确认只有一个网关（`gateway.lock` 会拦住第二个） |
 | 发文件报「超过今天发送文件容量上限」 | 平台按 bot 计的每日容量上限（`40093002`） | 次日恢复，网关已翻译成人话，不会重试 |
 | 白名单为空 | 任何人都能驱动 DSH | 扫码会自动加白名单，或点「只允许绑定的 QQ 使用」 |
+| 主动推送返回「目标不在白名单内」 | 出站默认只放行已知身份 | 把 openid 加进白名单，或勾选「允许任意目标」 |
+| 主动推送返回「网关未运行」 | 工具只把请求投给网关，自己不发 | 插件页确认网关状态为「已连接」 |
+| 主动推送被 QQ 拒绝 / 报频次受限 | QQ 对主动消息有**独立**配额，与被动回复无关 | 稍后再试；或先在 QQ 里给机器人发一条消息换取被动回复额度 |
+| 主动推送拆成了多条 | 正文超过 `pushMaxChars` | 调大 `pushMaxChars`，或精简正文（每段各占一条主动消息额度） |
+| 卡片提示 `qqbot_send` 未注册 | `tools` 服务不可用，工具未注册 | 卡片仍可发测试消息；对话与其余功能不受影响 |
 
 ## 版本兼容
 
 | DSH | 状态 |
 |---|---|
-| **0.2.0-rc.1（Web / 桌面端）** | ✅ 已适配：无需改动插件代码，直接通过 0.2.0-rc.1 新增的插件兼容性闸门 |
+| **0.2.0-rc.2 / 0.2.0-rc.1（Web / 桌面端）** | ✅ 已适配：无需改动插件代码，直接通过 0.2.0-rc.1 起新增的插件兼容性闸门 |
 | 0.1.7-rc.2（Web / 桌面端） | ✅ 已适配：组合包安装、「插件」页卡片、Electron ACP 启动、provider 自动复用 |
 | 0.1.5-rc.2 | 仍可加载运行：`.volatile()` / `installSection` 等差异用能力探测兜住；但设置写入路径不可用（旧 `installSection` 已删），配置改由 profile 补丁固定 |
 
-> **关于 0.2.0-rc.1 的兼容性闸门**：`dsh-app-boot` 会校验插件 `peerDependencies` 中所有
+> **关于兼容性闸门**：`dsh-app-boot` 会校验插件 `peerDependencies` 中所有
 > `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 项，只要有一项不满足
 > `semver.satisfies(runtime, range, { includePrerelease: true })`，就**跳过整个 bundle**。
 > 本插件的 peer 只有 `@deepseek-ai/schemastery: "*"`（不匹配 `dsh*` 前缀，不参与校验），
-> 因此 **0.2.0-rc.1 下无需改动任何声明即可正常加载**；`engines.dsh` 只是元数据，不参与该闸门。
+> 因此 **0.2.0-rc.x 下无需改动任何声明即可正常加载**；`engines.dsh` 只是元数据，不参与该闸门。
 > 实测（真实 `@deepseek-ai/dsh@0.2.0-rc.1` 运行时树）：`--dump-config` 零兼容性警告，
 > `qqbot` 行正常挂载，`ctx.settings`（`SettingsForms`）、`schemastery.volatile()`、
 > `ctx.subprocess`、`ctx.webServer` 等被依赖的接口均未变。
+>
+> ⚠️ **注册工具时不要引入 dsh 相关的 peer**：`qqbot_send` 依赖的 `@deepseek-ai/dsh-tools`
+> 是**动态 `import()`** 的（走宿主 profile 的解析层），**刻意不写进 `peerDependencies`**——
+> 一旦写成 peer，闸门就会按 semver 校验它，rc 版本号稍有出入就会把**整个 bundle 跳过**，
+> 代价是连对话都不可用。`tests/compat.mjs` 专门盯着这条约束。
 
 ## 安全提醒
 
@@ -337,7 +403,11 @@ ctx.slots.inject('plugins.bundle.config', () =>
 
 ## 已知限制
 
-- 未实现：频道（guild）收发、审批按钮卡片、多机器人实例。均不影响私聊/群聊对话与收发文件。
+- 未实现：频道（guild）收发、审批按钮卡片、多机器人实例。均不影响私聊/群聊对话、收发文件与主动推送。
+- 主动推送受 **QQ 平台的主动消息限制**（与被动回复额度是两套）：被拒时网关不重试，只把原因回给调用方。
+  单条上限由 `pushMaxChars` 控制，超出会拆成多条，每条各占一次主动消息配额。
+- 主动推送需要**网关在运行**（QQ 要求机器人保持 WebSocket 在线）；网关没跑时工具会明确报错而不是静默丢弃。
+  投递箱里已认领但未完成的请求在网关崩溃后**不会自动补发**——宁可丢一条，也不要重复打扰。
 - 桌面端无法从卡片跳系统浏览器打开本地配置页（Electron 外壳策略），这是刻意改成「配置与扫码都在卡片里」的原因。
 - `session-title-llm`（模型总结标题）在 ACP 场景下不工作：请求与路由都正常，但标题从不落盘，
   且 `session-title` 服务在 `work.signal.aborted` 时静默 `return`。本插件不依赖它 ——
@@ -357,23 +427,28 @@ lib/
   qq-transport.mjs   QQ Bot API v2 传输层（token / WebSocket / 发送）
   acp-client.mjs     ACP v1 stdio 客户端
   bind.mjs           扫码绑定（lite 接口 + AES-256-GCM 解密）
+  outbox.mjs         主动推送的投递箱（Host ⇄ 网关跨进程通道，纯逻辑）
   page.mjs           独立配置页 HTML
 cordis.patch.yml     组合包补丁（声明插件 loader 行）
-tests/               单测 / 客户端契约 / 离线 e2e
+tests/               单测 / 客户端契约 / 兼容性 / 离线 e2e
 ```
 
 ## 开发
 
 ```powershell
-npm run test:unit      # 纯逻辑：分片、纯文本清洗、命令行切分、AES-GCM 解密、二维码 SVG
-npm run test:client    # 客户端 bundle 契约：__ModuleLoader__ 注册、槽位 key、react 渲染
-npm run test:offline   # 用本地模拟 QQ 平台跑 握手/命令/去重/白名单，不消耗模型额度
+npm run test:unit      # 纯逻辑：分片、纯文本清洗、命令行切分、AES-GCM 解密、二维码 SVG、投递箱与推送策略
+npm run test:client    # 客户端 bundle 契约：__ModuleLoader__ 注册、槽位 key、卡片内容
+npm run test:compat    # 插件兼容性闸门：确认没有被门禁拦下的 dsh* peer
+npm run test:offline   # 用本地模拟 QQ 平台跑 握手/命令/去重/白名单/主动推送，不消耗模型额度
 npm test               # 完整：再加 真实对话 + 会话持久化 + 群聊 @（会调用模型）
 ```
 
 `tests/mock-qq.mjs` 起一个本地 HTTP + WebSocket 服务，实现 token / `/gateway` / `/v2/*/messages` /
 op10-hello / op2-identify→READY / op1→op11，于是整条「QQ 事件 → 会话路由 → ACP → 回复发回 QQ」
-都能在离线环境断言。
+以及「投递箱 → 网关 → QQ 主动推送」都能在离线环境断言。
+
+> 桌面端（PATH 上没有 `dsh`）跑 e2e 时，用 `E2E_ACP_COMMAND` 指向 asar 里的 CLI：
+> `$env:E2E_ACP_COMMAND='"D:\DSH Desktop\DeepSeek Harness.exe" "D:\DSH Desktop\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" --profile acp'`
 
 测试用端点覆盖（也便于指向自建代理）：
 
@@ -382,11 +457,15 @@ op10-hello / op2-identify→READY / op1→op11，于是整条「QQ 事件 → �
 | `DSH_QQBOT_TOKEN_URL` | 覆盖 `https://bots.qq.com/app/getAppAccessToken` |
 | `DSH_QQBOT_API_BASE` | 覆盖 `https://api.sgroup.qq.com` |
 | `DSH_QQBOT_EXIT_ON_STDIN_END` | `1` 时把 stdin EOF 当退出信号（插件拉起时设置） |
+| `DSH_QQBOT_PUSH_MAX_CHARS` | 主动推送单条字数上限 |
+| `DSH_QQBOT_PUSH_ALLOW_ANY_TARGET` | `1` 时允许推送给白名单外的目标 |
+| `DSH_QQBOT_PUSH_DEFAULT_TARGET` | 主动推送的默认目标 openid |
+| `E2E_ACP_COMMAND` | 仅测试用：覆盖 e2e 里拉起 ACP 的命令行 |
 
 ## 贡献
 
-欢迎 issue / PR。改动前请先跑 `npm run test:unit` 与 `npm run test:offline`（不需要模型额度）；
-涉及浏览器半的改动请一并跑 `npm run test:client`。
+欢迎 issue / PR。改动前请先跑 `npm run test:unit`、`npm run test:compat` 与 `npm run test:offline`
+（不需要模型额度）；涉及浏览器半的改动请一并跑 `npm run test:client`。
 
 ## License
 

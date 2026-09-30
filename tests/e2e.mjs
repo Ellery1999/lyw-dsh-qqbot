@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startMockQq } from './mock-qq.mjs'
+import { writePushRequest } from '../lib/outbox.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const GATEWAY = join(HERE, '..', 'lib', 'gateway.mjs')
@@ -42,9 +43,15 @@ async function main() {
       DSH_QQBOT_API_BASE: mock.baseUrl,
       DSH_QQBOT_STATE_DIR: stateDir,
       DSH_QQBOT_WORKDIR: workdir,
-      DSH_QQBOT_ACP_COMMAND: 'dsh --profile acp',
+      DSH_QQBOT_ACP_COMMAND: process.env.E2E_ACP_COMMAND ?? 'dsh --profile acp',
       DSH_QQBOT_EXIT_ON_STDIN_END: '1',
       DSH_QQBOT_PROGRESS_MS: '8000',
+      /**
+       * 入站白名单保持未配置（否则 2~8 节那些 user-openid-* 会被拦掉）。
+       * 主动推送这边打开「允许任意目标」，让 8.5/8.7 专注验证发送本身；
+       * 「默认不给推」这条策略由 8.6 的独立网关实例覆盖（见该节说明）。
+       */
+      DSH_QQBOT_PUSH_ALLOW_ANY_TARGET: '1',
       ...(process.env.E2E_ALLOW_USERS ? { DSH_QQBOT_ALLOW_USERS: process.env.E2E_ALLOW_USERS } : {}),
     },
   })
@@ -458,6 +465,123 @@ async function main() {
     check('/status 反映新的工作目录', statusCd.text.includes(cdDir), statusCd.text.slice(0, 220))
     const missing = await ask('/cd C:\\definitely\\missing\\dir', 'cmd-cd-2')
     check('/cd 对不存在的目录报错', missing.text.includes('目录不存在'), missing.text.slice(0, 60))
+
+    console.log('\n[8.5] 主动推送：投递箱 → QQ（不需要入站消息）')
+    /**
+     * 直接往投递箱写一条请求，等网关轮询后发出。
+     * 这条链路就是 qqbot_send 工具与插件页按钮的实现——它们写的是同一个文件。
+     */
+    const pushAndWait = async (request, label) => {
+      const { id } = writePushRequest(stateDir, request)
+      const resultFile = join(stateDir, 'outbox', `res-${id}.json`)
+      const deadline = Date.now() + 30_000
+      while (Date.now() < deadline && !existsSync(resultFile)) await sleep(150)
+      return existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : null
+    }
+
+    const beforePush = mock.sent.length
+    const pushOne = await pushAndWait(
+      { kind: 'c2c', target: 'user-push-A', text: '主动推送测试：一条不想等用户说话的提醒。', source: 'e2e' },
+      '单条主动推送',
+    )
+    check('主动推送被网关处理并回了结果', pushOne !== null, JSON.stringify(pushOne))
+    check('主动推送成功', pushOne?.ok === true, JSON.stringify(pushOne))
+    const pushed = mock.sent.slice(beforePush).find((m) => m.target === 'user-push-A')
+    check('消息真的发到 QQ', pushed !== undefined)
+    // 这是主动消息与被动回复的**唯一**区别：不带 msg_id/msg_seq。
+    check('主动推送不带 msg_id（这是主动消息的判定依据）', pushed?.body?.msg_id === undefined, JSON.stringify(pushed?.body))
+    check('主动推送不带 msg_seq', pushed?.body?.msg_seq === undefined, JSON.stringify(pushed?.body))
+    check('主动推送正文正确', String(pushed?.body?.content ?? '').includes('主动推送测试'))
+    check('结果回执记录了 1 段', pushOne?.segments === 1, String(pushOne?.segments))
+
+    console.log('\n[8.6] 主动推送：默认拒绝白名单外的目标')
+    // 本实例开着「允许任意目标」，所以这里另起一个**默认配置**的网关来验证真正的默认行为：
+    // 不开开关、白名单为空 ⇒ 只放行已知身份（pushDefaultTarget 指向的那个）。
+    {
+      const strictStateDir = mkdtempSync(join(tmpdir(), 'qqbot-e2e-strict-'))
+      const strictChild = spawn(process.execPath, [GATEWAY], {
+        cwd: dirname(GATEWAY),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          DSH_QQBOT_APP_ID: 'mock-app-id',
+          DSH_QQBOT_APP_SECRET: 'mock-app-secret',
+          DSH_QQBOT_TOKEN_URL: mock.tokenUrl,
+          DSH_QQBOT_API_BASE: mock.baseUrl,
+          DSH_QQBOT_STATE_DIR: strictStateDir,
+          DSH_QQBOT_WORKDIR: workdir,
+          DSH_QQBOT_ACP_COMMAND: process.env.E2E_ACP_COMMAND ?? 'dsh --profile acp',
+          DSH_QQBOT_EXIT_ON_STDIN_END: '1',
+          DSH_QQBOT_PUSH_DEFAULT_TARGET: 'user-known',
+          // 刻意不设 DSH_QQBOT_PUSH_ALLOW_ANY_TARGET，也不设白名单
+        },
+      })
+      strictChild.stdout.resume()
+      strictChild.stderr.resume()
+      const strictOutbox = join(strictStateDir, 'outbox')
+      /** 等严格网关起来（状态文件报告已连接）再投递。 */
+      const ready = Date.now() + 40_000
+      while (Date.now() < ready) {
+        try {
+          if (JSON.parse(readFileSync(join(strictStateDir, 'status.json'), 'utf8')).connection?.connected === true) break
+        } catch {
+          /* 还没写出来 */
+        }
+        await sleep(250)
+      }
+      const strictPush = async (request) => {
+        const { id } = writePushRequest(strictStateDir, request)
+        const resultFile = join(strictOutbox, `res-${id}.json`)
+        const deadline = Date.now() + 20_000
+        while (Date.now() < deadline && !existsSync(resultFile)) await sleep(150)
+        return existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : null
+      }
+      try {
+        const denied = await strictPush({ kind: 'c2c', target: 'outsider-openid', text: '不该发出去' })
+        check('默认配置下白名单外的目标被拒绝', denied?.ok === false, JSON.stringify(denied))
+        check('拒绝原因指明了放行办法', String(denied?.error ?? '').includes('白名单'), String(denied?.error))
+        check('被拒绝时不会发出消息', denied?.segments === 0)
+
+        const groupDenied = await strictPush({ kind: 'group', target: 'group-openid-G', text: '群推送默认关闭' })
+        check('群推送在默认配置下被拒绝', groupDenied?.ok === false, JSON.stringify(groupDenied))
+        check('群被拒原因提到 allowGroups', String(groupDenied?.error ?? '').includes('allowGroups'), String(groupDenied?.error))
+
+        const allowedDefault = await strictPush({ kind: 'c2c', target: 'user-known', text: '默认目标可以推' })
+        check('默认目标（pushDefaultTarget）仍可推送', allowedDefault?.ok === true, JSON.stringify(allowedDefault))
+
+        const badTarget = await strictPush({ kind: 'c2c', target: '../etc/passwd', text: 'x' })
+        check('非法字符的 target 被拒绝（防 URL 注入）', badTarget?.ok === false, JSON.stringify(badTarget))
+      } finally {
+        writeFileSync(join(strictStateDir, 'shutdown.request'), String(Date.now()))
+        await sleep(1500)
+        strictChild.kill()
+        await sleep(500)
+        rmSync(strictStateDir, { recursive: true, force: true, maxRetries: 3 })
+      }
+    }
+
+    console.log('\n[8.7] 主动推送：超长文本按 pushMaxChars 分段')
+    // mock 平台对同一目标不限速，所以能直接验证分段；真机上每段各占一条主动消息额度。
+    // 必须**明显超过** 3000 字，否则测不到分段（各段拼接仍需与原意一致）。
+    const line = '第N行：这是一段用于验证分段行为的填充文本，故意写长一点。'
+    const longText = Array.from({ length: 120 }, (_, i) => line.replace('N', String(i))).join('\n')
+    check('测试用长文确实超过单条上限（否则测不到分段）', longText.length > 3000, `len=${longText.length}`)
+    const beforeLong = mock.sent.length
+    const longPush = await pushAndWait({ kind: 'c2c', target: 'user-push-B', text: longText, source: 'e2e' }, '长文推送')
+    check('超长文本推送成功', longPush?.ok === true, JSON.stringify(longPush))
+    check('超长文本被拆成多段', (longPush?.segments ?? 0) > 1, String(longPush?.segments))
+    const longChunks = mock.sent.slice(beforeLong).filter((m) => m.target === 'user-push-B')
+    check('每段都不超过 pushMaxChars（默认 3000）', longChunks.every((m) => String(m.body?.content ?? '').length <= 3000),
+      JSON.stringify(longChunks.map((m) => String(m.body?.content ?? '').length)))
+    check('分段后仍不带 msg_id', longChunks.every((m) => m.body?.msg_id === undefined))
+    check('拼回的文本与原意一致（无内容丢失）', longChunks.map((m) => m.body.content).join('\n').replace(/\n+/g, '\n') === longText.replace(/\n+/g, '\n'))
+
+    console.log('\n[8.8] 主动推送：状态与统计对外可见')
+    const statusAfterPush = JSON.parse(readFileSync(join(stateDir, 'status.json'), 'utf8'))
+    check('status.json 记录了最近一次主动推送', statusAfterPush.lastPush?.target === 'user-push-B', JSON.stringify(statusAfterPush.lastPush))
+    check('统计里主动推送计数已累加', (statusAfterPush.stats?.pushes ?? 0) > 0, JSON.stringify(statusAfterPush.stats))
+    check('status.json 暴露投递箱快照', statusAfterPush.outbox !== undefined, JSON.stringify(statusAfterPush.outbox))
+    check('status.json 记录 pushMaxChars', statusAfterPush.pushMaxChars === 3000, String(statusAfterPush.pushMaxChars))
 
     console.log('\n[9] 优雅退出：退出请求文件 + 单实例锁释放')
     const exitPromise = new Promise((resolve) => child.once('exit', (code) => resolve(code)))
