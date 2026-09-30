@@ -466,18 +466,35 @@ async function main() {
     const missing = await ask('/cd C:\\definitely\\missing\\dir', 'cmd-cd-2')
     check('/cd 对不存在的目录报错', missing.text.includes('目录不存在'), missing.text.slice(0, 60))
 
-    console.log('\n[8.5] 主动推送：投递箱 → QQ（不需要入站消息）')
     /**
      * 直接往投递箱写一条请求，等网关轮询后发出。
      * 这条链路就是 qqbot_send 工具与插件页按钮的实现——它们写的是同一个文件。
+     * 定义在最前面：8.4 与 8.5+ 都要用（`const` 不提升，放后面会 TDZ 报错）。
      */
     const pushAndWait = async (request, label) => {
+      void label
       const { id } = writePushRequest(stateDir, request)
       const resultFile = join(stateDir, 'outbox', `res-${id}.json`)
       const deadline = Date.now() + 30_000
       while (Date.now() < deadline && !existsSync(resultFile)) await sleep(150)
       return existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : null
     }
+
+    console.log('\n[8.4] 投递箱：非法请求回 200 + ok:false（不是 500）')
+    // 回归：空内容曾因 throw 而回 HTTP 500，前端只能显示「HTTP 500」，
+    // 用户看不出「只是没填内容」。校验失败必须走 200 + 可读原因。
+    {
+      const writes = mock.sent.length
+      const empty = await pushAndWait({ kind: 'c2c', target: 'user-push-A', text: '   ' })
+      check('空正文被当成校验失败（不是服务端错误）', empty?.ok === false, JSON.stringify(empty))
+      check('空正文给出可读原因', String(empty?.error ?? '').includes('text'), String(empty?.error))
+      check('空正文不发出任何消息', mock.sent.length === writes)
+
+      const badKind = await pushAndWait({ kind: 'guild', target: 'user-push-A', text: 'x' })
+      check('非法 kind 被拒绝', badKind?.ok === false, JSON.stringify(badKind))
+    }
+
+    console.log('\n[8.5] 主动推送：投递箱 → QQ（不需要入站消息）')
 
     const beforePush = mock.sent.length
     const pushOne = await pushAndWait(

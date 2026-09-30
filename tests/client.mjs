@@ -122,6 +122,7 @@ if (!hasReact) {
   check('bundle 源码调用 /push-test 接口', source.includes("post('/push-test'"))
   check('bundle 源码含推送配置字段', source.includes('pushMaxChars') && source.includes('pushAllowAnyTarget') && source.includes('pushDefaultTarget'))
   check('bundle 源码含会话类型选择', source.includes("'c2c'") && source.includes("'group'"))
+  check('bundle 源码对推送失败做兜底显示', source.includes('推送失败'))
 } else {
   let html = ''
   try {

@@ -689,6 +689,82 @@ check('超时返回 ok:false 且说明原因（不抛错）', await (async () =>
   return result.ok === false && result.error.includes('超时')
 }))())
 
+console.log('\n[/push-test 接口校验]')
+/**
+ * 回归：/push-test 的空内容校验曾写成 `throw new Error(...)`，于是接口回 HTTP 500，
+ * 前端只能显示「HTTP 500」，用户看不出「只是没填内容」。
+ * 这里对 handleApi 打桩，验证校验失败必须是 200 + ok:false + 可读原因。
+ */
+{
+  const routes = []
+  const webServer = { port: 0, register: (route) => { routes.push(route); return () => {} } }
+  /** 注入后的子上下文：自带 webServer 与 effect（真实 cordis 也是这么给的）。 */
+  const makeCtx = () => ({
+    logger: { info() {}, warn() {}, error() {} },
+    // 插件用的是 ctx.webServer 属性（不是 ctx.get），两者都提供以免与真实用法脱节。
+    webServer,
+    get: (name) => (name === 'webServer' ? webServer : undefined),
+    on() {},
+    // 路由是在 effect 回调里注册的，桩必须真的把回调跑掉。
+    effect(callback) { const disposer = callback(); return typeof disposer === 'function' ? disposer : () => {} },
+    inject(names, callback) { if (names.includes('webServer')) callback(makeCtx()) },
+  })
+  const fakeCtx = makeCtx()
+  const hostMod = await import('../lib/index.js')
+  // 用最小配置挂载：enabled=false 不会去 spawn 网关，仅注册路由。
+  hostMod.apply(fakeCtx, { enabled: false, appId: '', appSecret: '', pushMaxChars: 3000, pushAllowAnyTarget: false, pushDefaultTarget: '' })
+
+  const apiRoute = routes.find((route) => route.kind === 'prefix')
+  check('插件注册了配置页 API 路由', apiRoute !== undefined)
+
+  /** 造一个最小 req/res，跑一次 API 调用。 */
+  const callApi = async (path, body) => {
+    const data = body === undefined ? null : Buffer.from(JSON.stringify(body))
+    /**
+     * 必须用 `[Symbol.asyncIterator]()` 返回一个**全新**的迭代器：
+     * `readJsonBody` 用 `for await (const chunk of req)` 消费，若直接给生成器函数体，
+     * 每个消费者会共享/耗尽同一个生成器，导致 body 收不到（表现为接口无响应）。
+     */
+    const req = {
+      url: path,
+      method: body === undefined ? 'GET' : 'POST',
+      [Symbol.asyncIterator]() {
+        let sent = false
+        return {
+          async next() {
+            if (data === null || sent) return { done: true, value: undefined }
+            sent = true
+            return { done: false, value: data }
+          },
+        }
+      },
+    }
+    let status = null
+    let payload = ''
+    let settle = null
+    // 路由注册的是 `(req, res) => void handleApi(...)`：handler 的返回值是 undefined，
+    // 响应在它自己那条 Promise 上异步完成。所以要等 res.end，而不是等 handler 返回。
+    const done = new Promise((resolve) => { settle = resolve })
+    const res = {
+      writeHead: (code) => { status = code },
+      end: (text) => { payload = text ?? ''; settle() },
+    }
+    await apiRoute.handler(req, res)
+    await Promise.race([done, new Promise((resolve) => setTimeout(resolve, 3000))])
+    let parsed = null
+    try { parsed = JSON.parse(payload) } catch { parsed = payload }
+    return { status, body: parsed }
+  }
+
+  const empty = await callApi('/plugins/qqbot/api/push-test', { text: '   ' })
+  check('空内容回 200（不是 500）', empty.status === 200, `status=${empty.status}`)
+  check('空内容回 ok:false', empty.body?.ok === false, JSON.stringify(empty.body))
+  check('空内容给出可读原因', String(empty.body?.error ?? '').includes('请输入'), String(empty.body?.error))
+
+  const wrongMethod = await callApi('/plugins/qqbot/api/push-test')
+  check('方法不匹配回 404 而不是抛错', wrongMethod.status === 404, `status=${wrongMethod.status}`)
+}
+
 const passed = results.filter(Boolean).length
 console.log(`\n===== ${passed}/${results.length} 通过 =====`)
 process.exit(passed === results.length ? 0 : 1)

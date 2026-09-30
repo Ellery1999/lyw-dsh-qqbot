@@ -1,7 +1,7 @@
 {
   "name": "@lyw/dsh-qqbot",
   "description": "把 DSH 接到 QQ 官方机器人（QQ Bot API v2）：QQ 私聊/群聊 → ACP → DSH 会话。在「插件」页查看状态并配置，扫码绑定页 /plugins/qqbot。",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
