@@ -14,8 +14,8 @@
 
 | | |
 |---|---|
-| 适配 DSH | **0.2.0-rc.2 / rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
-| 包版本 | 0.5.0 |
+| 适配 DSH | **0.2.1-rc.1 / 0.2.0-rc.2 / rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
+| 包版本 | 0.5.2 |
 | 许可证 | MIT |
 
 ## 特性
@@ -372,18 +372,25 @@ ctx.slots.inject('plugins.bundle.config', () =>
 
 | DSH | 状态 |
 |---|---|
+| **0.2.1-rc.1（Web / 桌面端）** | ✅ 已适配：0.2.1-rc.1 把兼容性闸门扩展到了 `engines.dsh`（见下），本插件的 `^0.2.0-rc.1` 在该闸门下依然通过；插件代码零改动 |
 | **0.2.0-rc.2 / 0.2.0-rc.1（Web / 桌面端）** | ✅ 已适配：无需改动插件代码，直接通过 0.2.0-rc.1 起新增的插件兼容性闸门 |
 | 0.1.7-rc.2（Web / 桌面端） | ✅ 已适配：组合包安装、「插件」页卡片、Electron ACP 启动、provider 自动复用 |
 | 0.1.5-rc.2 | 仍可加载运行：`.volatile()` / `installSection` 等差异用能力探测兜住；但设置写入路径不可用（旧 `installSection` 已删），配置改由 profile 补丁固定 |
 
-> **关于兼容性闸门**：`dsh-app-boot` 会校验插件 `peerDependencies` 中所有
-> `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 项，只要有一项不满足
-> `semver.satisfies(runtime, range, { includePrerelease: true })`，就**跳过整个 bundle**。
-> 本插件的 peer 只有 `@deepseek-ai/schemastery: "*"`（不匹配 `dsh*` 前缀，不参与校验），
-> 因此 **0.2.0-rc.x 下无需改动任何声明即可正常加载**；`engines.dsh` 只是元数据，不参与该闸门。
-> 实测（真实 `@deepseek-ai/dsh@0.2.0-rc.1` 运行时树）：`--dump-config` 零兼容性警告，
-> `qqbot` 行正常挂载，`ctx.settings`（`SettingsForms`）、`schemastery.volatile()`、
-> `ctx.subprocess`、`ctx.webServer` 等被依赖的接口均未变。
+> **关于兼容性闸门**：`dsh-app-boot` 会校验插件声明——**0.2.1-rc.1 起若 manifest 写了
+> `engines.dsh`，就最先且只查它**（peer 随之忽略）；没写 `engines.dsh` 时才逐项校验
+> `peerDependencies` 中所有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 项。
+> 判定一律是 `semver.satisfies(runtime, range, { includePrerelease: true })`，
+> 任何一项不满足就**跳过整个 bundle**。
+> 本插件 `engines.dsh` 为 `^0.2.0-rc.1`，在该闸门下覆盖 0.2.1-rc.1；peer 只有
+> `@deepseek-ai/schemastery: "*"`（不匹配 `dsh*` 前缀，不参与校验），因此**无需改动任何声明即可正常加载**。
+> 实测（对照 `@deepseek-ai/dsh` 0.2.0-rc.1 → 0.2.1-rc.1 源码逐包 diff + 真实 semver 判定）：
+> 本插件依赖的全部接口 —— `ctx.settings`（`SettingsForms`，含 volatile 校验）、
+> `loader/volatile-update`、`ctx.subprocess`（`spawn`/`SubprocessHandle` 形状逐字段一致）、
+> `ctx.profileContext`、`ctx.tools.register` + `defineTool`、`ctx.webServer`（`register`/`port`）、
+> base bundle 条目（`llm-pi-ai` / `agent-default-model` / `permission`）、`@deepseek-ai/dsh-acp`
+> 的 `{provider, model}` 配置、patch 文件格式、manifest 字段（`manifestVersion`/`client`）、
+> vendored cordis 与 schemastery —— 在 0.2.1-rc.1 中均未变化。
 >
 > ⚠️ **注册工具时不要引入 dsh 相关的 peer**：`qqbot_send` 依赖的 `@deepseek-ai/dsh-tools`
 > 是**动态 `import()`** 的（走宿主 profile 的解析层），**刻意不写进 `peerDependencies`**——
