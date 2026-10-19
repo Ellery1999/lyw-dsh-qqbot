@@ -14,8 +14,8 @@
 
 | | |
 |---|---|
-| 适配 DSH | **0.2.1-rc.1 / 0.2.0-rc.2 / rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
-| 包版本 | 0.5.2 |
+| 适配 DSH | **0.2.1-rc.2 / 0.2.1-rc.1 / 0.2.0-rc.2 / rc.1（Web 端 / 桌面端）**；0.1.7-rc.2 与 0.1.5-rc.2 仍可加载运行 |
+| 包版本 | 0.5.3 |
 | 许可证 | MIT |
 
 ## 特性
@@ -31,7 +31,7 @@
 
 ## 前置要求
 
-1. 一个可用的 **DSH**：0.2.0-rc.2 或 0.2.0-rc.1（Web 端或桌面端），0.1.7-rc.2 或 0.1.5-rc.2 亦可加载运行。
+1. 一个可用的 **DSH**：0.2.1-rc.2 / 0.2.1-rc.1 / 0.2.0-rc.2 / 0.2.0-rc.1（Web 端或桌面端），0.1.7-rc.2 或 0.1.5-rc.2 亦可加载运行。
 2. 一个 **QQ 开放平台机器人**，能拿到 **AppID / AppSecret**
    （没有的话可以用插件的扫码绑定流程创建并授权）。
 3. 桌面端或 Web 端至少要有一个能正常打开的 DSH 界面。
@@ -372,6 +372,7 @@ ctx.slots.inject('plugins.bundle.config', () =>
 
 | DSH | 状态 |
 |---|---|
+| **0.2.1-rc.2（Web / 桌面端）** | ✅ 已适配：rc2 的改动只在 **web 能力接缝**与客户端 UI（见下「rc2 差异核查」），本插件依赖的宿主接口零变化，插件代码零改动；`engines.dsh` 为 `^0.2.0-rc.1`，在该闸门下覆盖 0.2.1-rc.2 |
 | **0.2.1-rc.1（Web / 桌面端）** | ✅ 已适配：0.2.1-rc.1 把兼容性闸门扩展到了 `engines.dsh`（见下），本插件的 `^0.2.0-rc.1` 在该闸门下依然通过；插件代码零改动 |
 | **0.2.0-rc.2 / 0.2.0-rc.1（Web / 桌面端）** | ✅ 已适配：无需改动插件代码，直接通过 0.2.0-rc.1 起新增的插件兼容性闸门 |
 | 0.1.7-rc.2（Web / 桌面端） | ✅ 已适配：组合包安装、「插件」页卡片、Electron ACP 启动、provider 自动复用 |
@@ -381,21 +382,63 @@ ctx.slots.inject('plugins.bundle.config', () =>
 > `engines.dsh`，就最先且只查它**（peer 随之忽略）；没写 `engines.dsh` 时才逐项校验
 > `peerDependencies` 中所有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 项。
 > 判定一律是 `semver.satisfies(runtime, range, { includePrerelease: true })`，
-> 任何一项不满足就**跳过整个 bundle**。
-> 本插件 `engines.dsh` 为 `^0.2.0-rc.1`，在该闸门下覆盖 0.2.1-rc.1；peer 只有
+> 任何一项不满足就**跳过整个 bundle**。**0.2.1-rc.2 没有改这段逻辑**
+> （`packages/boot/app-boot/src/plugin-compatibility.ts` 在 rc1 → rc2 的 diff 里为空），
+> 所以 rc1 起生效的规则对 0.2.x 的各个 rc 一视同仁：本插件的 `engines.dsh ^0.2.0-rc.1`
+> 覆盖 0.2.1-rc.2 / 0.2.1-rc.1 / 0.2.0-rc.2 / 0.2.0-rc.1；peer 只有
 > `@deepseek-ai/schemastery: "*"`（不匹配 `dsh*` 前缀，不参与校验），因此**无需改动任何声明即可正常加载**。
-> 实测（对照 `@deepseek-ai/dsh` 0.2.0-rc.1 → 0.2.1-rc.1 源码逐包 diff + 真实 semver 判定）：
-> 本插件依赖的全部接口 —— `ctx.settings`（`SettingsForms`，含 volatile 校验）、
+>
+> **rc2 差异核查结论（为什么 qqbot 不用改）**：对照 `@deepseek-ai/dsh` 0.2.1-rc.1 → 0.2.1-rc.2
+> 的逐包 diff，改动只落在 web 接缝与客户端：
+> ① `WebRuntime` 的 `searchProvider` / `fetchProvider` 由普通 string 改成 schemastery
+> `.volatile()`（设置页可改，静态 patch 值仍然生效）——qqbot **不注册、不调用 web provider**，
+> 用的是自己的 ACP 链路，所以不受影响；
+> ② 新增 base bundle 条目 `web-deepseek-api`（注册 id `deepseek-search-api` / `deepseek-fetch-api`）——
+> 纯**新增**条目，不覆盖任何既有 id；qqbot 只关心 `llm-pi-ai` / `agent-default-model` /
+> `permission` 这三条，rc2 里它们原样未动；
+> ③ 新增客户端包 `ui-deepseek-model-label-1017` —— 只是往
+> `conversation.input.model.label` 这个 slot 里多了一个 occupant，slot API 本身没变；
+> ④ 重写了 `ui-settings-web-search` 设置卡片 —— 它只操作 `web` / `web-search-deepseek` /
+> `web-deepseek-api` 三个命名空间，与 qqbot 的 `qqbot` 命名空间无关；
+> ⑤ `web-search-deepseek` 只改了错误文案并给辅助请求加了 `thinking: {type:'disabled'}`。
+> 本插件依赖的全部宿主接口 —— `ctx.settings`（`SettingsForms`，含 volatile 校验）、
 > `loader/volatile-update`、`ctx.subprocess`（`spawn`/`SubprocessHandle` 形状逐字段一致）、
 > `ctx.profileContext`、`ctx.tools.register` + `defineTool`、`ctx.webServer`（`register`/`port`）、
-> base bundle 条目（`llm-pi-ai` / `agent-default-model` / `permission`）、`@deepseek-ai/dsh-acp`
-> 的 `{provider, model}` 配置、patch 文件格式、manifest 字段（`manifestVersion`/`client`）、
-> vendored cordis 与 schemastery —— 在 0.2.1-rc.1 中均未变化。
+> 客户端 slot `plugins.bundle.config`（含 `inject` + `register` 契约）、
+> base bundle 条目、`@deepseek-ai/dsh-acp` 的 `{provider, model}` 配置、
+> patch 文件格式、manifest 字段（`manifestVersion`/`client`）、vendored cordis 与 schemastery
+> —— 在 0.2.1-rc.2 中均未变化；桌面 asar 内 CLI 路径（`resources/app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`）
+> 也未变。`tests/compat.mjs` 与下面「真机验证」表把上述结论变成了可复跑的断言与现场证据。
 >
 > ⚠️ **注册工具时不要引入 dsh 相关的 peer**：`qqbot_send` 依赖的 `@deepseek-ai/dsh-tools`
 > 是**动态 `import()`** 的（走宿主 profile 的解析层），**刻意不写进 `peerDependencies`**——
 > 一旦写成 peer，闸门就会按 semver 校验它，rc 版本号稍有出入就会把**整个 bundle 跳过**，
 > 代价是连对话都不可用。`tests/compat.mjs` 专门盯着这条约束。
+
+## 真机验证（DSH 0.2.1-rc.2 桌面运行时）
+
+运行时为 `D:\DSH Desktop\DeepSeek Harness.exe`（asar 内 `@deepseek-ai/dsh-app-boot` = **0.2.1-rc.2**）。
+以下都是 0.5.3 发布前实际跑出来的结果，可在同版本运行时上复跑。
+
+| 项目 | 命令 / 操作 | 结果 |
+|---|---|---|
+| 纯逻辑单测 | `node tests/unit.mjs` | **178/178 通过** |
+| 客户端 bundle 契约 | `node tests/client.mjs` | **15/15 通过** |
+| 兼容性闸门 | `node tests/compat.mjs`（含显式 `0.2.1-rc.2`） | **7/7 通过**：`engines.dsh ^0.2.0-rc.1` 覆盖 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.1 / **0.2.1-rc.2** |
+| 离线 e2e（模拟 QQ + 模拟 ACP） | `node tests/e2e.mjs --skip-llm` | **85/85 通过**（不消耗模型额度） |
+| 真实运行时工具注册探针 | `node tests/tool-register.mjs` | **2/2 通过**：临时 profile 内 `tools` 服务可用且 `qqbot_send` 已注册（重名注册被拒） |
+| tarball 校验 | `node tests/verify-tarball.mjs` | **15/15 通过**：版本/`engines.dsh`/无 dsh* peer/代码与仓库一致 |
+| 真 semver 判定 | 用运行时自带 semver 算 `^0.2.0-rc.1` vs `0.2.1-rc.2` | `satisfies(..., { includePrerelease: true })` = **true**；不带 `includePrerelease` 才是 false，宿主带了该选项 |
+| 隔离环境安装 + 组合检查 | 临时 `DSH_HOME` 建 `compat` profile → `dsh plugin add <tgz>` → `--dump-config` | 组合里出现 `- id: qqbot`，**无 `incompatible`**，stderr 为空 |
+| 真实启动（真机 boot） | `dsh --profile compat --no-open --port 0`，20s 后仍存活 | stdout 打印 `dsh web: http://127.0.0.1:<port>/?token=…`，**stderr 为空**、无 loader 报错；`<DSH_HOME>/qqbot/plugin.json` 由插件写入 |
+| 配置页与 API 路由 | `GET /plugins/qqbot`、`GET /plugins/qqbot/api/state` | 均 **200**；`state` 返回真实 JSON（`acpCommand` 指向 asar 内 CLI、`gatewayState: stopped`） |
+| 客户端 bundle 被 rc2 模块图收录 | 从首页 HTML 的 combo 列表取含 `@lyw/dsh-qqbot/client.js` 的 URL 再请求 | **200**，内容含 `QqbotCard`、`plugins/qqbot`、`push-test` —— 说明客户端半在 rc2 的模块图/服务路径下正常 |
+| 设置写入（volatile 路径） | `POST /plugins/qqbot/api/save`（改 `pushMaxChars` / `allowUsers`） | **200**，`ctx.settings.update('qqbot', …)` 真的落盘到 profile 的 `cordis.patch.yml` |
+| 客户端 UI slot | `tests/client.mjs` 断言 + rc2 `slot-catalog` 对照 | `plugins.bundle.config` 契约未变（rc2 只在 `conversation.input.model.label` 多了一行 occupant） |
+
+> 关于 `tests/e2e.mjs` 的两处主动推送断言：0.5.3 把「空正文不发消息」「长文推送消息真的发到 QQ」
+> 按 **`msg_id` 过滤（只看主动消息）**。这是**测试稳定性修复**（前面的用例还有异步的被动回复
+> 在途，`msg-attach-1` 的「⏳ 正在思考…」偶尔会落进后一个窗口），**不改插件任何行为**。
 
 ## 安全提醒
 

@@ -1,13 +1,19 @@
 /**
- * 适配性核查：用 0.2.1-rc.1 的判定逻辑在本机复核本包是否会通过插件兼容性门禁。
+ * 适配性核查：用 0.2.1-rc.2 的判定逻辑在本机复核本包是否会通过插件兼容性门禁。
  *
- * 门禁规则（dsh-app-boot/evaluatePluginCompatibility，0.2.1-rc.1 起）：
+ * 门禁规则（dsh-app-boot/evaluatePluginCompatibility）：
  *   1. manifest 若声明了 `engines.dsh`，则**最先且只查它**（peerDependencies 随之忽略）；
  *   2. 未声明时才逐项检查 peerDependencies 里名字为 `@deepseek-ai/dsh` 或以
  *      `@deepseek-ai/dsh-` 开头的项；
  *   3. 判定一律用 semver.satisfies(runtime, range, { includePrerelease: true })；
  *   4. 任何一项不满足 ⇒ 跳过整个 bundle。
- *   （0.2.0-rc.x 的旧闸门不查 engines.dsh，只查第 2 条。）
+ *
+ * 0.2.1-rc.2 的闸门代码（packages/boot/app-boot/src/plugin-compatibility.ts）
+ * 与 0.2.1-rc.1 **逐字节一致**（rc1 → rc2 的 git diff 里该文件为空），规则同上：
+ * 仍然优先 `engines.dsh`、仍然带 includePrerelease。
+ * 本包 `engines.dsh` 是 `^0.2.0-rc.1`，在真实 semver 下覆盖 0.2.1-rc.2
+ * （`semver.satisfies('0.2.1-rc.2', '^0.2.0-rc.1', { includePrerelease: true }) === true`）；
+ * 换成不带 includePrerelease 的默认判定则会是 false —— 宿主带了这个选项，所以通过。
  *
  * 用法：node tests/compat.mjs [runtimeVersion]
  */
@@ -41,7 +47,7 @@ const gated = Object.entries(peers).filter(([name]) => name === '@deepseek-ai/ds
 const gateUsesEngines = typeof enginesDsh === 'string'
 
 console.log(`包版本      ${manifest.version}`)
-console.log(`engines.dsh ${enginesDsh}${gateUsesEngines ? '（0.2.1-rc.1 起参与门禁且优先）' : '（仅元数据，不参与门禁）'}`)
+console.log(`engines.dsh ${enginesDsh}${gateUsesEngines ? '（0.2.1-rc.1 起参与门禁且优先，0.2.1-rc.2 沿用同一规则）' : '（仅元数据，不参与门禁）'}`)
 console.log(`运行时      ${runtime}`)
 console.log(`受门禁的 peer：${gateUsesEngines ? '（engines.dsh 存在，peer 被忽略）' : gated.length === 0 ? '（无）' : gated.map(([n, r]) => `${n}@${r}`).join(', ')}`)
 
@@ -53,7 +59,7 @@ const check = (name, ok, detail = '') => {
 
 console.log('\n[门禁判定]')
 if (gateUsesEngines) {
-  // 0.2.1-rc.1 起 engines.dsh 优先且单独决定结果；这里复核它对每个目标运行时可解析。
+  // 0.2.1-rc.1 起 engines.dsh 优先且单独决定结果；rc2 未改动这段逻辑。
   console.log('  （engines.dsh 已声明：闸门只查它，peer 不参与）')
 } else {
   check('没有会触发门禁的 @deepseek-ai/dsh* peer（因此不会被跳过）', gated.length === 0, JSON.stringify(peers))
@@ -63,11 +69,19 @@ check('peerDependencies 仅剩 schemastery（按设计，走 profile 回退层�
 check('未把 @deepseek-ai/dsh-tools 写成 peer（否则 rc 不匹配会跳过整个 bundle）',
   !Object.hasOwn(peers, '@deepseek-ai/dsh-tools'))
 
-console.log('\n[engines 范围对新旧运行时可解析]')
-for (const candidate of [...new Set(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.1', runtime])]) {
+console.log('\n[engines 范围对 rc2 及历史运行时可解析]')
+for (const candidate of [...new Set(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.1', '0.2.1-rc.2', runtime])]) {
   const ok = satisfies(candidate, enginesDsh)
   check(`engines.dsh ${enginesDsh} 覆盖 ${candidate}`, ok === true, String(ok))
 }
+
+// 复刻闸门对 0.2.1-rc.2 的**完整判定**（不只是范围比较）：engines.dsh 存在且满足
+// ⇒ 没有任何 unmet requirement ⇒ 不跳过整个 bundle。peer 分支在这里被忽略。
+const unmetFor = (runtimeVersion) => (gateUsesEngines
+  ? (satisfies(runtimeVersion, enginesDsh) === true ? {} : { 'engines.dsh': enginesDsh })
+  : Object.fromEntries(gated.filter(([, range]) => satisfies(runtimeVersion, range) !== true)))
+check('门禁对运行时 0.2.1-rc.2 的判定为「通过」（不会跳过整个 bundle）',
+  Object.keys(unmetFor('0.2.1-rc.2')).length === 0, JSON.stringify(unmetFor('0.2.1-rc.2')))
 
 const passed = io => io
 void passed

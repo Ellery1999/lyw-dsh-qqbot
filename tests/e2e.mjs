@@ -480,15 +480,26 @@ async function main() {
       return existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : null
     }
 
+    /**
+     * 只统计**主动消息**（不带 msg_id）。
+     *
+     * 前面用例里还有异步的被动回复在途：4.5 的 `msg-attach-1` 走的是真实 ACP 提示词，
+     * 它的「⏳ 正在思考…」进度占位可能直到这一节才落地（夹带 msg-attach-1 的 msg_id）。
+     * 那是对另一条入站消息的回复，与本次非法投递无关；按 msg_id 过滤后，
+     * 断言才真正对准「投递箱不该发出任何主动消息」，也顺带消掉这个偶发竞态。
+     */
+    const proactiveCount = () => mock.sent.filter((m) => m.body?.msg_id === undefined).length
+
     console.log('\n[8.4] 投递箱：非法请求回 200 + ok:false（不是 500）')
     // 回归：空内容曾因 throw 而回 HTTP 500，前端只能显示「HTTP 500」，
     // 用户看不出「只是没填内容」。校验失败必须走 200 + 可读原因。
     {
-      const writes = mock.sent.length
+      const writes = proactiveCount()
       const empty = await pushAndWait({ kind: 'c2c', target: 'user-push-A', text: '   ' })
       check('空正文被当成校验失败（不是服务端错误）', empty?.ok === false, JSON.stringify(empty))
       check('空正文给出可读原因', String(empty?.error ?? '').includes('text'), String(empty?.error))
-      check('空正文不发出任何消息', mock.sent.length === writes)
+      check('空正文不发出任何消息', proactiveCount() === writes,
+        JSON.stringify(mock.sent.slice(-3).map((m) => ({ target: m.target, msg_id: m.body?.msg_id, content: String(m.body?.content ?? '').slice(0, 40) }))))
 
       const badKind = await pushAndWait({ kind: 'guild', target: 'user-push-A', text: 'x' })
       check('非法 kind 被拒绝', badKind?.ok === false, JSON.stringify(badKind))
@@ -503,7 +514,8 @@ async function main() {
     )
     check('主动推送被网关处理并回了结果', pushOne !== null, JSON.stringify(pushOne))
     check('主动推送成功', pushOne?.ok === true, JSON.stringify(pushOne))
-    const pushed = mock.sent.slice(beforePush).find((m) => m.target === 'user-push-A')
+    // 只找主动消息（不带 msg_id）：上面同样的在途被动回复也可能落在 user-openid-A 上。
+    const pushed = mock.sent.slice(beforePush).find((m) => m.target === 'user-push-A' && m.body?.msg_id === undefined)
     check('消息真的发到 QQ', pushed !== undefined)
     // 这是主动消息与被动回复的**唯一**区别：不带 msg_id/msg_seq。
     check('主动推送不带 msg_id（这是主动消息的判定依据）', pushed?.body?.msg_id === undefined, JSON.stringify(pushed?.body))
